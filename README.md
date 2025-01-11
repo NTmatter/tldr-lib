@@ -1,8 +1,12 @@
-# Tangy Lib
+# TLDR - Lib
+Tang in a Lambda with Database, written in Rust.
 
 ## Description
+An inexpensive high-availability/fault-tolerant Tang server backed by a database.
 
-Tangy-lib is a library implementation of the Tang server, written in rust.
+The TLDR Lib is fork of Martyn P's [Tangy-Lib](https://github.com/martynp/tangy-lib), which reimplements the core functionality of Latchset's [Tang](https://github.com/latchset/tang) server.
+
+TLDR Lib diverges from Tangy-Lib by using a database to store keys, rather than a filesystem. The initial focus will be on DynamoDB to facilitate small AWS deployments.
 
 The Tang protocol allows clients to store secrets which can only be recovered when they have access to the Tang server. For example, the Clevis tools allows the automated decryption of LUKS partitions when the encrypted device is connected to the local network that Tang is accessible on.
 
@@ -18,22 +22,22 @@ Fraser Tweedale's 2020 Linux Conference Australia talk on "Clevis and Tang: secu
 Installation via cargo:
 
 ``` bash
-cargo add tangy-lib
+cargo add tldr-lib
 ```
 
 Or directly using in the dependencies section of Cargo.toml:
 
 ``` toml
 [dependencies]
-tangy-lib = "0.1"
+tldr-lib = "0.1"
 ```
 
 ## Usage
 
-Tangy-lib has an initialization method which can take a local directory or vector of JWK string as input:
+Tldr-lib has an initialization method which can take a local directory or vector of JWK string as input:
 
 ``` rust
-use tangy_lib::{KeySource, TangyLib};
+use tldr_lib::{KeySource, TangyLib};
 let mut tangy = TangyLib::init(KeySource::LocalDir(&dir_path)).unwrap();
 // or
 let mut tangy = TangyLib::init(KeySource::Vector(&vec_of_keys)).unwrap();
@@ -45,7 +49,7 @@ The local directory and vector load methods will process the keys and generate e
 
 If `init` returns `Ok` then everything else should work.
 
-Tang uses `advertise` and `recovery` stages, to generate an adversise response and then recovery response:
+Tang uses `advertise` and `recovery` stages, to generate an advertise response and then recovery response:
 
 ``` rust
 use tangy_lib::{KeySource, TangyLib};
@@ -67,6 +71,8 @@ let keys : Vec<String> = tangy_lib::create_new_key_set();
 It creates ES512 and ECMR keys.
 
 ## Credits
+
+The original author of Tangy is Martyn P.
 
 The original authors of [Tang](https://github.com/latchset/tang) are [Latchset](https://github.com/latchset/). Tang is based on the protocol described by Nathaniel McCallum and Robert Relyea (https://marc.info/?m=144173814525805).
 
