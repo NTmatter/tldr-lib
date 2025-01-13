@@ -121,7 +121,7 @@ impl TangyLib {
 
     pub fn adv_internal(&self, skid: Option<&str>) -> Result<String, std::io::Error> {
         #[derive(serde::Serialize)]
-        struct Siguature {
+        struct Signature {
             protected: String,
             signature: String,
         }
@@ -133,7 +133,7 @@ impl TangyLib {
             #[serde(skip_serializing_if = "Option::is_none")]
             signature: Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
-            signatures: Option<Vec<Siguature>>,
+            signatures: Option<Vec<Signature>>,
         }
 
         #[derive(serde::Serialize)]
@@ -253,7 +253,7 @@ impl TangyLib {
                 signatures: Some(
                     signatures
                         .iter()
-                        .map(|s| Siguature {
+                        .map(|s| Signature {
                             protected: protected.to_owned(),
                             signature: base64ct::Base64Url::encode(&s.to_bytes(), &mut buf)
                                 .unwrap()
@@ -379,7 +379,7 @@ fn load_keys_from_vec<T: AsRef<str>>(
                 return None;
             };
 
-            let thumbprint = thumprint(&jwk.crv, &jwk.kty, &jwk.x, &jwk.y);
+            let thumbprint = thumbprint(&jwk.crv, &jwk.kty, &jwk.x, &jwk.y);
 
             Some((thumbprint, jwk))
         })
@@ -443,7 +443,7 @@ fn create_new_jwk(alg: &str, key_ops: &[&str]) -> String {
     .unwrap()
 }
 
-fn thumprint(crv: &str, kty: &str, x: &str, y: &str) -> String {
+fn thumbprint(crv: &str, kty: &str, x: &str, y: &str) -> String {
     #[derive(Serialize)]
     struct Required {
         crv: String,
