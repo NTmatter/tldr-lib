@@ -37,6 +37,7 @@ pub enum KeySource<'a> {
 
 // TODO Make backends and dependencies optional
 /// Source for Derive and Sign/Verification keys. Uses URI's protocol for differentiation.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum Backends {
     /// Retrieve from environment variables.
     ///
