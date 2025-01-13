@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use base64ct::Encoding;
+use ecdsa::SigningKey;
+use elliptic_curve::{rand_core::OsRng, JwkEcKey};
+use p521::ecdsa;
+use serde::Serialize;
+use sha2::Digest;
+use std::future::Future;
 use std::{
     collections::HashMap,
     fs::File,
@@ -7,13 +14,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
-
-use base64ct::Encoding;
-use ecdsa::SigningKey;
-use elliptic_curve::{rand_core::OsRng, JwkEcKey};
-use p521::ecdsa;
-use serde::Serialize;
-use sha2::Digest;
+use std::io::Error;
 use url::Url;
 
 // TODO Convert all of these into a dynamic lookup.
@@ -23,6 +24,74 @@ pub struct TangyLib {
     keys: std::collections::HashMap<String, MyJwkEcKey>,
     signing_keys: Vec<MyJwkEcKey>,
     default_adv: String,
+}
+
+pub type Thumbprint = String;
+
+/// Information about a key, plus the key itself.
+#[derive(Debug, Clone)]
+struct KeyWithMetadata {
+    thumbprint: Thumbprint,
+    key_type: String,
+    algorithm: String,
+    advertise: bool,
+    key: MyJwkEcKey,
+}
+
+// What does a Key Source do?
+// - Get all keys (adv)
+// - Get one key by its thumbprint (adv/:skid),
+// - Store a new key set, very rare.
+//
+// The application should figure out what to advertise.
+// It doesn't currently hide rotated keys from the default advertisement.
+/// A repository backend for JWKs.
+///
+/// Assumed to be a very small set of keys that are frequently accessed and queried.
+/// A separate cache layer can prevent the backend from being hammered.
+pub trait JwkStore {
+    /// Retrieve a map of thumbprints to all known keys.
+    ///
+    /// Given a database, it might be better to avoid enumerating all keys.
+    fn get_all_keys(
+        &self,
+    ) -> impl Future<Output = Result<HashMap<Thumbprint, KeyWithMetadata>, std::io::Error>> + Send;
+
+    /// Retrieve a key by its thumbprint.
+    fn get_key(
+        &self,
+        thumbprint: &Thumbprint,
+    ) -> impl Future<Output = Result<Option<KeyWithMetadata>, std::io::Error>> + Send;
+
+    /// Store a new set of sign/verify and derive keys, initially inactive to allow propagation
+    /// before advertising to clients.
+    fn store_keys(
+        &mut self,
+        signing_key: MyJwkEcKey,
+        derive_key: MyJwkEcKey,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    /// Set advertising state for a particular pair of keys.
+    ///
+    /// Advertising should be enabled after a key has been propagated to all nodes, at least two
+    /// cache periods for safety.
+    fn set_advertise(
+        &mut self,
+        signing_thumbprint: &Thumbprint,
+        derive_thumbprint: &Thumbprint,
+        advertise: bool,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    /// Delete a pair of sign/verify and derive keys.
+    ///
+    /// This will fail if the keys are actively advertised.
+    ///
+    /// DESIGN Key usage needs to be monitored. Increment counter on cache expiry?
+    fn delete_keys(
+        &mut self,
+        signing_key: MyJwkEcKey,
+        derive_key: MyJwkEcKey,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
 }
 
 // DESIGN The key source needs to allow dynamic fetching.
@@ -316,6 +385,7 @@ impl TangyLib {
     }
 
     pub fn rec(&self, kid: &str, request: &str) -> Result<String, std::io::Error> {
+        // Find key by thumbprint
         let key = self.keys.iter().find_map(|(k, v)| {
             if k == kid {
                 return Some(v);
@@ -669,6 +739,7 @@ impl MyJwkEcKey {
     }
 }
 
+#[allow(unused, reason = "Convenient for reference and building tests.")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,7 +790,7 @@ mod tests {
     #[test]
     fn adv() {
         let v = vec![JWK_ES512, JWK_ECMR];
-        let mut t = TangyLib::init(KeySource::Vector(&v)).unwrap();
+        let t = TangyLib::init(KeySource::Vector(&v)).unwrap();
         let advertisment = t.adv(None).unwrap();
 
         #[derive(Deserialize)]
@@ -749,7 +820,7 @@ mod tests {
     #[test]
     fn adv_skid() {
         let v = vec![JWK_ES512, JWK_ECMR];
-        let mut t = TangyLib::init(KeySource::Vector(&v)).unwrap();
+        let t = TangyLib::init(KeySource::Vector(&v)).unwrap();
         let advertisment = t.adv(Some(JWK_ES512_THUMBPRINT.into())).unwrap();
 
         #[derive(Deserialize)]
