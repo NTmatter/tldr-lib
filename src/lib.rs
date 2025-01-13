@@ -14,7 +14,10 @@ use elliptic_curve::{rand_core::OsRng, JwkEcKey};
 use p521::ecdsa;
 use serde::Serialize;
 use sha2::Digest;
+use url::Url;
 
+// TODO Convert all of these into a dynamic lookup.
+// TODO Optionally cache keys to reduce server load.
 #[derive(Debug)]
 pub struct TangyLib {
     keys: std::collections::HashMap<String, MyJwkEcKey>,
@@ -22,10 +25,55 @@ pub struct TangyLib {
     default_adv: String,
 }
 
+// DESIGN The key source needs to allow dynamic fetching.
+// LocalDir should hit the filesystem on each request (may incur lots of IO, unless we can be smarter)
+// Vector should be an `Arc<RwLock<Vec<T>>` for external management
+// DynamoDB
 #[derive(PartialEq)]
 pub enum KeySource<'a> {
     LocalDir(&'a Path),
     Vector(&'a Vec<&'a str>),
+}
+
+// TODO Make backends and dependencies optional
+/// Source for Derive and Sign/Verification keys. Uses URI's protocol for differentiation.
+pub enum Backends {
+    /// Retrieve from environment variables.
+    ///
+    /// If unspecified, `env://` uses `DERIVE` and `SIGN_VERIFY` by default.
+    /// Alternative variables can be specified on the query string:
+    /// `env://?derive=ALTERNATE_DERIVE&sign_verify=ALTERNATE_SIGN_VERIFY`
+    Env,
+    /// Retrieve from a particular directory. Specified with `file:///path/to/dir`
+    Directory,
+    /// Retrieve from a Sqlite database. Supports in-memory databases for ephemeral testing.
+    /// Specify with `sqlite:///path/to/file` or `sqlite://:memory:`
+    Sqlite,
+    /// Specify with `postgres://server/table`
+    Postgres,
+    /// Specify with `mssql://server/table`
+    MsSqlServer,
+    /// Specify with `dynamodb://table-name`
+    DynamoDb,
+    /// Retrieve from AWS Secrets Manager. Expects a secret that contains a list of derive and sign/verify keys.
+    ///
+    /// Specify with `asm://secret_name`
+    AwsSecretsManager,
+}
+
+impl Backends {
+    pub fn for_url(url: &Url) -> Option<Backends> {
+        match url.scheme() {
+            "env" => Some(Backends::Env),
+            "file" => Some(Backends::Directory),
+            "sqlite" => Some(Backends::Sqlite),
+            "postgres" => Some(Backends::Postgres),
+            "mssql" => Some(Backends::MsSqlServer),
+            "dynamodb" => Some(Backends::DynamoDb),
+            "asm" => Some(Backends::AwsSecretsManager),
+            _ => None,
+        }
+    }
 }
 
 impl TangyLib {
@@ -320,6 +368,7 @@ fn set_file_permissions(file: &File) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+// DESIGN Handle keys that are hidden due to rotation (filename starts with a dot)
 fn load_keys_from_dir(db_path: &Path) -> Result<HashMap<String, MyJwkEcKey>, std::io::Error> {
     if !db_path.exists() {
         return Err(std::io::Error::new(
