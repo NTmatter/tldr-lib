@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+#![allow(unused, reason = "In Development")]
+
 use base64ct::Encoding;
 use ecdsa::SigningKey;
 use elliptic_curve::{rand_core::OsRng, JwkEcKey};
 use p521::ecdsa;
 use serde::Serialize;
 use sha2::Digest;
-use std::future::Future;
+use std::collections::HashSet;
+use std::io::Error;
 use std::{
     collections::HashMap,
     fs::File,
@@ -14,14 +17,30 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
-use std::io::Error;
 use url::Url;
+
+const SHA2_256_SIZE: usize = 32;
+
+/// Ensure that a given thumbprint is a valid URL-Safe Base64 string that decodes into
+/// a SHA2-256 buffer.
+fn validate_thumbprint(thumbprint: &str) -> Result<(), std::io::Error> {
+    if base64ct::Base64UrlUnpadded::decode(thumbprint.as_bytes(), &mut [0u8; SHA2_256_SIZE])
+        .is_err()
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Invalid thumbprint \"{thumbprint}\""),
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 // TODO Convert all of these into a dynamic lookup.
 // TODO Optionally cache keys to reduce server load.
 #[derive(Debug)]
 pub struct TangyLib {
-    keys: std::collections::HashMap<String, MyJwkEcKey>,
+    keys: HashMap<String, MyJwkEcKey>,
     signing_keys: Vec<MyJwkEcKey>,
     default_adv: String,
 }
@@ -29,19 +48,33 @@ pub struct TangyLib {
 pub type Thumbprint = String;
 
 /// Information about a key, plus the key itself.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct KeyWithMetadata {
     thumbprint: Thumbprint,
     key_type: String,
-    algorithm: String,
+    algorithm: Option<String>,
     advertise: bool,
     key: MyJwkEcKey,
+    // DESIGN Count direct references to key during cached lifetime
+    // direct_cache_hits: AtomicI64,
+}
+
+impl From<MyJwkEcKey> for KeyWithMetadata {
+    fn from(key: MyJwkEcKey) -> Self {
+        Self {
+            thumbprint: key.thumbprint(),
+            key_type: key.kty.clone(),
+            algorithm: key.alg.clone(),
+            advertise: false,
+            key,
+        }
+    }
 }
 
 // What does a Key Source do?
 // - Get all keys (adv)
 // - Get one key by its thumbprint (adv/:skid),
-// - Store a new key set, very rare.
+// - Manage a key set (create/advertise/unadvertise/delete), very rare.
 //
 // The application should figure out what to advertise.
 // It doesn't currently hide rotated keys from the default advertisement.
@@ -49,49 +82,457 @@ struct KeyWithMetadata {
 ///
 /// Assumed to be a very small set of keys that are frequently accessed and queried.
 /// A separate cache layer can prevent the backend from being hammered.
-pub trait JwkStore {
+#[allow(async_fn_in_trait, reason = "For internal use only")]
+trait JwkStore {
     /// Retrieve a map of thumbprints to all known keys.
     ///
     /// Given a database, it might be better to avoid enumerating all keys.
-    fn get_all_keys(
-        &self,
-    ) -> impl Future<Output = Result<HashMap<Thumbprint, KeyWithMetadata>, std::io::Error>> + Send;
+    async fn get_all_keys(&self) -> Result<HashMap<Thumbprint, KeyWithMetadata>, std::io::Error>;
 
     /// Retrieve a key by its thumbprint.
-    fn get_key(
+    ///
+    /// DESIGN Key usage needs to be monitored. Increment a counter when used directly?
+    async fn get_key(
         &self,
         thumbprint: &Thumbprint,
-    ) -> impl Future<Output = Result<Option<KeyWithMetadata>, std::io::Error>> + Send;
+    ) -> Result<Option<KeyWithMetadata>, std::io::Error>;
 
     /// Store a new set of sign/verify and derive keys, initially inactive to allow propagation
     /// before advertising to clients.
-    fn store_keys(
+    async fn store_keys(
         &mut self,
         signing_key: MyJwkEcKey,
         derive_key: MyJwkEcKey,
-    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+    ) -> Result<(), std::io::Error>;
 
-    /// Set advertising state for a particular pair of keys.
+    /// Enable advertising state for a particular pair of keys.
     ///
     /// Advertising should be enabled after a key has been propagated to all nodes, at least two
     /// cache periods for safety.
-    fn set_advertise(
+    async fn advertise_keys(
         &mut self,
         signing_thumbprint: &Thumbprint,
         derive_thumbprint: &Thumbprint,
-        advertise: bool,
-    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+    ) -> Result<(), std::io::Error>;
+
+    /// Disable advertising state for a particular pair of keys.
+    ///
+    /// Advertising should be disabled once a new set of keys has been created. This does not
+    /// delete the keys, as they will be needed by clients that have not rotated to the new keys.
+    async fn unadvertise_keys(
+        &mut self,
+        signing_thumbprint: &Thumbprint,
+        derive_thumbprint: &Thumbprint,
+    ) -> Result<(), std::io::Error>;
 
     /// Delete a pair of sign/verify and derive keys.
     ///
     /// This will fail if the keys are actively advertised.
-    ///
-    /// DESIGN Key usage needs to be monitored. Increment counter on cache expiry?
-    fn delete_keys(
+    async fn delete_keys(
         &mut self,
         signing_key: MyJwkEcKey,
         derive_key: MyJwkEcKey,
-    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+    ) -> Result<(), std::io::Error>;
+}
+
+struct DirBackend {
+    path: PathBuf,
+}
+
+impl DirBackend {
+    fn new(path: PathBuf) -> Result<Self, std::io::Error> {
+        if !path.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Key database \"{}\" does not exist", path.to_string_lossy()),
+            ));
+        }
+
+        if !path.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!(
+                    "Key database \"{}\" is not a directory",
+                    path.to_string_lossy()
+                ),
+            ));
+        }
+
+        Ok(Self { path })
+    }
+}
+
+impl JwkStore for DirBackend {
+    async fn get_all_keys(&self) -> Result<HashMap<Thumbprint, KeyWithMetadata>, std::io::Error> {
+        if !self.path.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "Key database \"{}\" does not exist",
+                    self.path.to_string_lossy()
+                ),
+            ));
+        }
+
+        if !self.path.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!(
+                    "Key database \"{}\" is not a directory",
+                    self.path.to_string_lossy()
+                ),
+            ));
+        }
+
+        let jwk_files: Vec<PathBuf> = self
+            .path
+            .read_dir()?
+            .filter_map(|f| f.ok())
+            .map(|e| e.path())
+            .filter(|f| f.extension() == Some(std::ffi::OsStr::new("jwk")))
+            .collect();
+
+        let keys: HashMap<Thumbprint, KeyWithMetadata> = jwk_files
+            .iter()
+            .filter_map(|file_path| {
+                let Some(file_name) = file_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                else {
+                    return None;
+                };
+                let advertised = file_name.starts_with('.');
+
+                // TODO Async read for potentially larger directories
+                let Ok(file_content) = std::fs::read_to_string(file_path) else {
+                    return None;
+                };
+                let Ok(jwk) = serde_json::from_str::<MyJwkEcKey>(&file_content) else {
+                    return None;
+                };
+                let mut metadata = KeyWithMetadata::from(jwk);
+                metadata.advertise = advertised;
+
+                // TODO Ensure that fingerprint matches filename.
+
+                Some((metadata.thumbprint.clone(), metadata))
+            })
+            .collect();
+
+        // Sanity Check for duplicate advertised and unadvertised keys.
+        let mut seen_keys = HashSet::new();
+        keys.keys().try_for_each(|thp| {
+            if !seen_keys.insert(thp) {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Key is both advertised and unadvertised: {thp}"),
+                ))
+            } else {
+                Ok(())
+            }
+        })?;
+
+        Ok(keys)
+    }
+
+    async fn get_key(
+        &self,
+        thumbprint: &Thumbprint,
+    ) -> Result<Option<KeyWithMetadata>, std::io::Error> {
+        if !self.path.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!(
+                    "Key database \"{}\" is not a directory",
+                    self.path.to_string_lossy()
+                ),
+            ));
+        }
+
+        let advertised = self.path.join(format!("{thumbprint}.jwk"));
+        let unadvertised = self.path.join(format!(".{thumbprint}.jwk"));
+
+        let (advertised, file_content) = if advertised.try_exists()? && advertised.is_file() {
+            (true, std::fs::read_to_string(advertised)?)
+        } else if unadvertised.try_exists()? && unadvertised.is_file() {
+            (false, std::fs::read_to_string(&unadvertised)?)
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("No key found for thumbprint {thumbprint}"),
+            ));
+        };
+
+        let jwk = match serde_json::from_str::<MyJwkEcKey>(&file_content) {
+            Ok(jwk) => jwk,
+            Err(err) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Could not parse key: {}", err),
+                ))
+            }
+        };
+
+        let mut metadata = KeyWithMetadata::from(jwk);
+        metadata.advertise = advertised;
+
+        // TODO Ensure that thumbprint matches file name.
+
+        Ok(Some(metadata))
+    }
+
+    async fn store_keys(
+        &mut self,
+        signing_key: MyJwkEcKey,
+        derive_key: MyJwkEcKey,
+    ) -> Result<(), std::io::Error> {
+        let signing_thumbprint = signing_key.thumbprint();
+        let signing_advertised = self.path.join(format!("{signing_thumbprint}.jwk"));
+        let signing_advertised_is_file = signing_advertised.is_file();
+
+        let signing_unadvertised = self.path.join(format!(".{signing_thumbprint}.jwk"));
+        let signing_unadvertised_is_file = signing_unadvertised.is_file();
+
+        let derive_thumbprint = derive_key.thumbprint();
+        let derive_advertised = self.path.join(format!("{derive_thumbprint}.jwk"));
+        let derive_advertised_is_file = derive_advertised.is_file();
+
+        let derive_unadvertised = self.path.join(format!(".{derive_thumbprint}.jwk"));
+        let derive_unadvertised_is_file = derive_unadvertised.is_file();
+
+        // Sanity Check: Ensure that data doesn't already exist
+        if signing_advertised_is_file || signing_unadvertised_is_file {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("Signing key already exists with thumbprint {signing_thumbprint}"),
+            ));
+        }
+
+        if derive_advertised_is_file || derive_unadvertised_is_file {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("Derive key already exists with thumbprint {derive_thumbprint}"),
+            ));
+        }
+
+        let signing_json = serde_json::to_string(&signing_key)?;
+        let derive_json = serde_json::to_string(&derive_key)?;
+
+        // Safe from directory traversal, thumbprint generated with
+        // [a-zA-Z0-9_-] base64ct::Base64UrlUnpadded::encode_string
+        std::fs::write(&signing_unadvertised, &signing_json)?;
+        std::fs::write(&derive_unadvertised, &derive_json)?;
+
+        Ok(())
+    }
+
+    async fn advertise_keys(
+        &mut self,
+        signing_thumbprint: &Thumbprint,
+        derive_thumbprint: &Thumbprint,
+    ) -> Result<(), std::io::Error> {
+        // Sanity Check: Thumbprints are well-formed url-safe base64, prevents traversal attacks.
+        validate_thumbprint(&signing_thumbprint)?;
+        validate_thumbprint(&derive_thumbprint)?;
+
+        let signing_advertised = self.path.join(format!("{signing_thumbprint}.jwk"));
+        let signing_advertised_is_file = signing_advertised.is_file();
+
+        let signing_unadvertised = self.path.join(format!(".{signing_thumbprint}.jwk"));
+        let signing_unadvertised_is_file = signing_unadvertised.is_file();
+
+        let derive_advertised = self.path.join(format!("{derive_thumbprint}.jwk"));
+        let derive_advertised_is_file = derive_advertised.is_file();
+
+        let derive_unadvertised = self.path.join(format!(".{derive_thumbprint}.jwk"));
+        let derive_unadvertised_is_file = derive_unadvertised.is_file();
+
+        // Sanity check before move
+        match (signing_advertised_is_file, signing_unadvertised_is_file) {
+            (true, false) => {} // Nothing to do
+            (false, true) => {} // Rename file
+            (false, false) => {
+                // Not found.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("No keys found for thumbprint {signing_thumbprint}"),
+                ));
+            }
+            (true, true) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Key for thumbprint {signing_thumbprint} is both advertised and unadvertised."),
+                ));
+            }
+        }
+
+        match (derive_advertised_is_file, derive_unadvertised_is_file) {
+            (true, false) => {} // Nothing to do
+            (false, true) => {} // Rename file
+            (false, false) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("No keys found for thumbprint {derive_thumbprint}"),
+                ));
+            } // Not found.
+            (true, true) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Key for thumbprint {derive_thumbprint} is both advertised and unadvertised."),
+                ));
+            }
+        }
+
+        // Perform moves if required
+        if !signing_advertised_is_file && signing_unadvertised_is_file {
+            std::fs::rename(signing_unadvertised, signing_advertised)?;
+        }
+
+        if !derive_advertised_is_file && derive_unadvertised_is_file {
+            std::fs::rename(derive_unadvertised, derive_advertised)?;
+        }
+
+        Ok(())
+    }
+
+    async fn unadvertise_keys(
+        &mut self,
+        signing_thumbprint: &Thumbprint,
+        derive_thumbprint: &Thumbprint,
+    ) -> Result<(), Error> {
+        // Sanity Check: Thumbprints are well-formed url-safe base64, prevents traversal attacks.
+        validate_thumbprint(&signing_thumbprint)?;
+        validate_thumbprint(&derive_thumbprint)?;
+
+        let signing_advertised = self.path.join(format!("{signing_thumbprint}.jwk"));
+        let signing_advertised_is_file = signing_advertised.is_file();
+
+        let signing_unadvertised = self.path.join(format!(".{signing_thumbprint}.jwk"));
+        let signing_unadvertised_is_file = signing_unadvertised.is_file();
+
+        let derive_advertised = self.path.join(format!("{derive_thumbprint}.jwk"));
+        let derive_advertised_is_file = derive_advertised.is_file();
+
+        let derive_unadvertised = self.path.join(format!(".{derive_thumbprint}.jwk"));
+        let derive_unadvertised_is_file = derive_unadvertised.is_file();
+
+        // Sanity Check: Verify state of source and target files
+        match (signing_advertised_is_file, signing_unadvertised_is_file) {
+            (false, true) => {} // Nothing to do
+            (true, false) => {} // Rename file
+            (false, false) => {
+                // Not found.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("No keys found for thumbprint {signing_thumbprint}"),
+                ));
+            }
+            (true, true) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Key for thumbprint {signing_thumbprint} is both advertised and unadvertised."),
+                ));
+            }
+        }
+
+        // Sanity Check: Verify state of source and target files
+        match (derive_advertised_is_file, derive_unadvertised_is_file) {
+            (false, true) => {} // Nothing to do
+            (true, false) => {} // Rename file
+            (false, false) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("No keys found for thumbprint {derive_thumbprint}"),
+                ));
+            } // Not found.
+            (true, true) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Key for thumbprint {derive_thumbprint} is both advertised and unadvertised."),
+                ));
+            }
+        }
+
+        // Perform moves if required
+        if signing_advertised_is_file && !signing_unadvertised_is_file {
+            std::fs::rename(signing_advertised, signing_unadvertised)?;
+        }
+
+        if derive_advertised_is_file && !derive_unadvertised_is_file {
+            std::fs::rename(derive_advertised, derive_unadvertised)?;
+        }
+
+        Ok(())
+    }
+
+    async fn delete_keys(
+        &mut self,
+        signing_key: MyJwkEcKey,
+        derive_key: MyJwkEcKey,
+    ) -> Result<(), std::io::Error> {
+        let signing_thumbprint = signing_key.thumbprint();
+        validate_thumbprint(&signing_thumbprint)?;
+
+        let signing_advertised = self.path.join(format!("{signing_thumbprint}.jwk"));
+        let signing_advertised_is_file = signing_advertised.is_file();
+
+        let signing_unadvertised = self.path.join(format!(".{signing_thumbprint}.jwk"));
+        let signing_unadvertised_is_file = signing_unadvertised.is_file();
+
+        let derive_thumbprint = derive_key.thumbprint();
+        validate_thumbprint(&derive_thumbprint)?;
+        let derive_advertised = self.path.join(format!("{derive_thumbprint}.jwk"));
+        let derive_advertised_is_file = derive_advertised.is_file();
+
+        let derive_unadvertised = self.path.join(format!(".{derive_thumbprint}.jwk"));
+        let derive_unadvertised_is_file = derive_unadvertised.is_file();
+
+        // Sanity Check: Ensure that keys are not currently advertised.
+        if signing_advertised_is_file {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Will not delete signing key with thumbprint {signing_thumbprint} because it is currently advertised."
+                ),
+            ));
+        }
+
+        if derive_advertised_is_file {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Will not delete derive key with thumbprint {derive_thumbprint} because it is currently advertised."
+                ),
+            ));
+        }
+
+        // Perform deletions
+        let base_path = self.path.canonicalize()?;
+        if signing_unadvertised_is_file {
+            let signing_path = signing_unadvertised.canonicalize()?;
+            if !signing_path.starts_with(&base_path) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Signing Key file {signing_thumbprint} does not live in keystore."),
+                ));
+            }
+            std::fs::remove_file(signing_unadvertised)?;
+        }
+
+        if derive_unadvertised_is_file {
+            let derive_path = derive_unadvertised.canonicalize()?;
+            if !derive_path.starts_with(&base_path) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Derive Key file {derive_thumbprint} does not live in keystore."),
+                ));
+            }
+
+            std::fs::remove_file(derive_unadvertised)?;
+        }
+
+        Ok(())
+    }
 }
 
 // DESIGN The key source needs to allow dynamic fetching.
