@@ -4,6 +4,8 @@
 
 pub mod backend;
 
+use crate::backend::dir::DirBackend;
+use crate::backend::{Backend, JwkStore};
 use base64ct::Encoding;
 use ecdsa::SigningKey;
 use elliptic_curve::{rand_core::OsRng, JwkEcKey};
@@ -17,6 +19,8 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
+use url::Url;
+
 const SHA2_256_SIZE: usize = 32;
 
 /// Ensure that a given thumbprint is a valid URL-Safe Base64 string that decodes into
@@ -38,21 +42,21 @@ fn validate_thumbprint(thumbprint: &str) -> Result<(), std::io::Error> {
 // TODO Optionally cache keys to reduce server load.
 #[derive(Debug)]
 pub struct TangyLib {
-    keys: HashMap<String, MyJwkEcKey>,
-    signing_keys: Vec<MyJwkEcKey>,
+    keys: HashMap<String, KeyWithMetadata>,
+    signing_keys: Vec<KeyWithMetadata>,
     default_adv: String,
 }
 
 pub type Thumbprint = String;
 
 /// Information about a key, plus the key itself.
-#[derive(Debug)]
-struct KeyWithMetadata {
-    thumbprint: Thumbprint,
-    key_type: String,
-    algorithm: Option<String>,
-    advertise: bool,
-    key: MyJwkEcKey,
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct KeyWithMetadata {
+    pub(crate) thumbprint: Thumbprint,
+    pub(crate) key_type: String,
+    pub(crate) algorithm: Option<String>,
+    pub(crate) advertise: bool,
+    pub(crate) key: MyJwkEcKey,
     // DESIGN Count direct references to key during cached lifetime
     // direct_cache_hits: AtomicI64,
 }
@@ -80,18 +84,26 @@ pub enum KeySource<'a> {
 }
 
 impl TangyLib {
-    pub fn init(source: KeySource) -> Result<Self, std::io::Error> {
-        let mut loaded_keys = match source {
-            KeySource::LocalDir(dir) => load_keys_from_dir(dir)?,
-            KeySource::Vector(keys) => load_keys_from_vec(keys)?,
-        };
+    pub async fn init(source: &Url) -> Result<Self, std::io::Error> {
+        match Backend::for_url(source)? {
+            Backend::Directory(backend) => Self::init_with_backend(backend).await,
+            _ => todo!("Only the Directory backend is supported"),
+        }
+    }
+
+    /// Load all keys from the datasource and identify the Sign/Verify and Derive keys.
+    pub(crate) async fn init_with_backend(
+        mut backend: impl JwkStore,
+    ) -> Result<Self, std::io::Error> {
+        use Backend::*;
+        let mut loaded_keys = backend.get_all_keys().await?;
 
         let ecmr_exists = loaded_keys
             .iter()
-            .any(|(_, v)| v.alg.is_some() && v.alg.as_ref().unwrap() == "ECMR");
+            .any(|(_, v)| v.key.alg.is_some() && v.key.alg.as_ref().unwrap() == "ECMR");
         let es512_exists = loaded_keys
             .iter()
-            .any(|(_, v)| v.alg.is_some() && v.alg.as_ref().unwrap() == "ES512");
+            .any(|(_, v)| v.key.alg.is_some() && v.key.alg.as_ref().unwrap() == "ES512");
 
         if (!ecmr_exists && es512_exists) || (ecmr_exists && !es512_exists) {
             return Err(std::io::Error::new(
@@ -101,42 +113,23 @@ impl TangyLib {
         }
 
         if !ecmr_exists && !es512_exists {
-            match source {
-                KeySource::LocalDir(dir) => {
-                    let keys = create_new_key_set();
-                    for k in keys.iter() {
-                        let jwk: MyJwkEcKey = serde_json::from_str(k).map_err(|e| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("Unable to create new JWK: {e}"),
-                            )
-                        })?;
-                        let thumbprint = jwk.thumbprint();
-                        if let Ok(mut file) =
-                            std::fs::File::create(dir.join(format!("{}.jwk", thumbprint)))
-                        {
-                            file.write_all(k.as_bytes())?;
-                            set_file_permissions(&file)?;
-                        }
-                        loaded_keys.insert(thumbprint, jwk);
-                    }
-                }
-                KeySource::Vector(_) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "ES512 and ECMR keys not present in input vector",
-                    ));
-                }
-            }
+            let (new_signing_key, new_derive_key) = create_new_key_set();
+            let new_signing_key = serde_json::from_str::<MyJwkEcKey>(&new_signing_key)?;
+            let new_derive_key = serde_json::from_str::<MyJwkEcKey>(&new_derive_key)?;
+
+            backend.store_keys(new_signing_key, new_derive_key).await?;
+
+            // XXX Re-fetch all keys once new ones are created.
+            loaded_keys = backend.get_all_keys().await?;
         }
 
         // Extract a signing key from the JWK, it shouldn't really be generated using a
         // from_bytes call from the secret key... perhaps the SigningKey From trait is
         // missing for the secret key.
-        let signing_keys: Vec<MyJwkEcKey> = loaded_keys
+        let signing_keys: Vec<KeyWithMetadata> = loaded_keys
             .iter()
             .filter_map(|(_, v)| {
-                if let Some(alg) = v.alg.as_ref() {
+                if let Some(alg) = v.key.alg.as_ref() {
                     if alg == "ES512" {
                         return Some(v.clone());
                     }
@@ -192,10 +185,10 @@ impl TangyLib {
             keys: Vec<MyJwkEcKey>,
         }
 
-        let keys: Vec<&MyJwkEcKey> = self.keys.values().collect();
+        let keys: Vec<&MyJwkEcKey> = self.keys.values().map(|k| &k.key).collect();
 
         let signing_keys = if let Some(kid) = skid {
-            let key = self.keys.get(kid);
+            let key = self.keys.get(kid).map(|k| &k.key);
             if key.is_none() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -223,7 +216,7 @@ impl TangyLib {
             }
             vec![key.unwrap().clone()]
         } else {
-            self.signing_keys.to_vec()
+            self.signing_keys.iter().map(|k| k.key.clone()).collect()
         };
 
         let payload = base64ct::Base64Url::encode_string(
@@ -342,6 +335,7 @@ impl TangyLib {
         let p = diffie_hellman_public_key(
             &key.as_ref()
                 .unwrap()
+                .key
                 .to_jwk_ec_key(false)
                 .to_secret_key::<p521::NistP521>()
                 .unwrap()
@@ -353,10 +347,11 @@ impl TangyLib {
     }
 }
 
-pub fn create_new_key_set() -> Vec<String> {
+/// Create a new Sign/Verify key and Derive key.
+pub fn create_new_key_set() -> (String, String) {
     let es512_jwk = create_new_jwk("ES512", &["sign", "verify"]);
     let ecmr_jwk = create_new_jwk("ECMR", &["deriveKey"]);
-    vec![es512_jwk, ecmr_jwk]
+    (es512_jwk, ecmr_jwk)
 }
 
 #[cfg(target_os = "linux")]
@@ -676,6 +671,8 @@ impl MyJwkEcKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::vec::VecBackend;
+    use crate::backend::Backend::EphemeralVec;
     use serde::Deserialize;
 
     const JWK_ES512: &str = r#"
@@ -706,24 +703,30 @@ mod tests {
 
     const JWK_ECMR_THUMBPRINT: &str = "UFgqx9-PLx_h6h4hd6sysNHMC6cDyjBQOYZHFvObLbo";
 
-    #[test]
-    fn source_local_dir() {
+    #[tokio::test]
+    async fn source_local_dir() {
         let tmp_dir = tempdir::TempDir::new("local_dir_test").unwrap();
-        let t = TangyLib::init(KeySource::LocalDir(&tmp_dir.path()));
+        let path = tmp_dir.path();
+        let url = Url::from_directory_path(path).unwrap();
+        let t = TangyLib::init(&url).await;
         assert!(t.is_ok());
     }
 
-    #[test]
-    fn source_vector() {
+    #[tokio::test]
+    async fn source_vector() {
         let v = vec![JWK_ES512, JWK_ECMR];
-        let t = TangyLib::init(KeySource::Vector(&v));
+        let v: Vec<MyJwkEcKey> = v.iter().map(|s| serde_json::from_str(s).unwrap()).collect();
+        let b = VecBackend::from(v);
+        let t = TangyLib::init_with_backend(b).await;
         assert!(t.is_ok());
     }
 
-    #[test]
-    fn adv() {
+    #[tokio::test]
+    async fn adv() {
         let v = vec![JWK_ES512, JWK_ECMR];
-        let t = TangyLib::init(KeySource::Vector(&v)).unwrap();
+        let v: Vec<MyJwkEcKey> = v.iter().map(|s| serde_json::from_str(s).unwrap()).collect();
+        let b = VecBackend::from(v);
+        let t = TangyLib::init_with_backend(b).await.unwrap();
         let advertisment = t.adv(None).unwrap();
 
         #[derive(Deserialize)]
@@ -750,10 +753,12 @@ mod tests {
         assert_eq!(payload.keys.len(), 2);
     }
 
-    #[test]
-    fn adv_skid() {
+    #[tokio::test]
+    async fn adv_skid() {
         let v = vec![JWK_ES512, JWK_ECMR];
-        let t = TangyLib::init(KeySource::Vector(&v)).unwrap();
+        let v: Vec<MyJwkEcKey> = v.iter().map(|s| serde_json::from_str(s).unwrap()).collect();
+        let b = VecBackend::from(v);
+        let t = TangyLib::init_with_backend(b).await.unwrap();
         let advertisment = t.adv(Some(JWK_ES512_THUMBPRINT.into())).unwrap();
 
         #[derive(Deserialize)]

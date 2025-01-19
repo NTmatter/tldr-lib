@@ -1,8 +1,11 @@
+use crate::backend::dir::DirBackend;
+use crate::backend::vec::VecBackend;
 use crate::{KeyWithMetadata, MyJwkEcKey, Thumbprint};
 use std::collections::HashMap;
 use url::Url;
 
 pub mod dir;
+pub(crate) mod vec;
 
 // What does a Key Source do?
 // - Get all keys (adv)
@@ -16,7 +19,7 @@ pub mod dir;
 /// Assumed to be a very small set of keys that are frequently accessed and queried.
 /// A separate cache layer can prevent the backend from being hammered.
 #[allow(async_fn_in_trait, reason = "For internal use only")]
-trait JwkStore {
+pub(crate) trait JwkStore {
     /// Retrieve a map of thumbprints to all known keys.
     ///
     /// Given a database, it might be better to avoid enumerating all keys.
@@ -63,15 +66,16 @@ trait JwkStore {
     /// This will fail if the keys are actively advertised.
     async fn delete_keys(
         &mut self,
-        signing_key: MyJwkEcKey,
-        derive_key: MyJwkEcKey,
+        signing_key: &Thumbprint,
+        derive_key: &Thumbprint,
     ) -> Result<(), std::io::Error>;
 }
 
 // TODO Make backends and dependencies optional
 /// Source for Derive and Sign/Verification keys. Uses URI's protocol for differentiation.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub enum Backends {
+pub(crate) enum Backend {
+    /// Internal Vec-based backend
+    EphemeralVec(VecBackend),
     /// Retrieve from environment variables.
     ///
     /// If unspecified, `env://` uses `DERIVE` and `SIGN_VERIFY` by default.
@@ -79,9 +83,9 @@ pub enum Backends {
     /// `env://?derive=ALTERNATE_DERIVE&sign_verify=ALTERNATE_SIGN_VERIFY`
     Env,
     /// Retrieve from a particular directory. Specified with `file:///path/to/dir`
-    Directory,
+    Directory(DirBackend),
     /// Retrieve from a Sqlite database. Supports in-memory databases for ephemeral testing.
-    /// Specify with `sqlite:///path/to/file` or `sqlite://:memory:`
+    /// Specify with `sqlite:///path/to/file` or `sqlite::memory:`
     Sqlite,
     /// Specify with `postgres://server/table`
     Postgres,
@@ -95,17 +99,21 @@ pub enum Backends {
     AwsSecretsManager,
 }
 
-impl Backends {
-    pub fn for_url(url: &Url) -> Option<Backends> {
+impl Backend {
+    pub fn for_url(url: &Url) -> Result<Backend, std::io::Error> {
+        use Backend::*;
         match url.scheme() {
-            "env" => Some(Backends::Env),
-            "file" => Some(Backends::Directory),
-            "sqlite" => Some(Backends::Sqlite),
-            "postgres" => Some(Backends::Postgres),
-            "mssql" => Some(Backends::MsSqlServer),
-            "dynamodb" => Some(Backends::DynamoDb),
-            "asm" => Some(Backends::AwsSecretsManager),
-            _ => None,
+            "env" => Ok(Env),
+            "file" => Ok(Directory(DirBackend::new(url)?)),
+            "sqlite" => Ok(Sqlite),
+            "postgres" => Ok(Postgres),
+            "mssql" => Ok(MsSqlServer),
+            "dynamodb" => Ok(DynamoDb),
+            "asm" => Ok(AwsSecretsManager),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Unknown backend scheme: {}", url.scheme()),
+            )),
         }
     }
 }

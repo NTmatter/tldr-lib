@@ -3,13 +3,18 @@ use crate::{KeyWithMetadata, MyJwkEcKey, Thumbprint};
 use std::collections::{HashMap, HashSet};
 use std::io::Error;
 use std::path::PathBuf;
+use url::Url;
 
-struct DirBackend {
+pub(crate) struct DirBackend {
     path: PathBuf,
 }
 
 impl DirBackend {
-    fn new(path: PathBuf) -> Result<Self, std::io::Error> {
+    pub(crate) fn new(url: &Url) -> Result<Self, std::io::Error> {
+        let path = url
+            .to_file_path()
+            .expect("Failed to convert path to file path");
+
         if !path.exists() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -336,10 +341,9 @@ impl JwkStore for DirBackend {
 
     async fn delete_keys(
         &mut self,
-        signing_key: MyJwkEcKey,
-        derive_key: MyJwkEcKey,
+        signing_thumbprint: &Thumbprint,
+        derive_thumbprint: &Thumbprint,
     ) -> Result<(), std::io::Error> {
-        let signing_thumbprint = signing_key.thumbprint();
         crate::validate_thumbprint(&signing_thumbprint)?;
 
         let signing_advertised = self.path.join(format!("{signing_thumbprint}.jwk"));
@@ -348,7 +352,6 @@ impl JwkStore for DirBackend {
         let signing_unadvertised = self.path.join(format!(".{signing_thumbprint}.jwk"));
         let signing_unadvertised_is_file = signing_unadvertised.is_file();
 
-        let derive_thumbprint = derive_key.thumbprint();
         crate::validate_thumbprint(&derive_thumbprint)?;
         let derive_advertised = self.path.join(format!("{derive_thumbprint}.jwk"));
         let derive_advertised_is_file = derive_advertised.is_file();
