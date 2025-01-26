@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use url::Url;
 
 pub mod dir;
+mod dynamodb;
 pub(crate) mod vec;
 
 // What does a Key Source do?

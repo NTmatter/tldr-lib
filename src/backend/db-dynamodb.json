@@ -1,0 +1,21 @@
+{
+  "TableDescription": {
+    "TableName": "tldr",
+    "AttributeDefinitions": [
+      {
+        "AttributeName": "thumbprint","AttributeType": "S"
+      }
+    ],
+    "KeySchema": [
+      {
+        "AttributeName": "thumbprint","KeyType": "HASH"
+      }
+    ],
+    "ProvisionedThroughput": {
+      "ReadCapacityUnits": 1,"WriteCapacityUnits": 1
+    },
+    "TableClassSummary": {
+      "TableClass": "STANDARD"
+    }
+  }
+}

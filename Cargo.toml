@@ -18,5 +18,9 @@ sha2 = "0.10"
 url = { version = "2.5.4", features = ["serde"] }
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread"] }
 
+aws-config = { version = "1.5.15", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = "1.62.0"
+anyhow = "1.0.95"
+
 [dev-dependencies]
 tempdir = "0.3.7"

@@ -10,7 +10,7 @@ use base64ct::Encoding;
 use ecdsa::SigningKey;
 use elliptic_curve::{rand_core::OsRng, JwkEcKey};
 use p521::ecdsa;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::{
     collections::HashMap,
@@ -50,7 +50,7 @@ pub struct TangyLib {
 pub type Thumbprint = String;
 
 /// Information about a key, plus the key itself.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct KeyWithMetadata {
     pub(crate) thumbprint: Thumbprint,
     pub(crate) key_type: String,
@@ -119,7 +119,7 @@ impl TangyLib {
 
             backend.store_keys(new_signing_key, new_derive_key).await?;
 
-            // XXX Re-fetch all keys once new ones are created.
+            // Re-fetch all keys.
             loaded_keys = backend.get_all_keys().await?;
         }
 
