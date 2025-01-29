@@ -84,9 +84,10 @@ pub enum KeySource<'a> {
 }
 
 impl TangyLib {
-    pub async fn init(source: &Url) -> Result<Self, std::io::Error> {
-        match Backend::for_url(source)? {
+    pub async fn init(source: &Url) -> anyhow::Result<Self, std::io::Error> {
+        match Backend::for_url(source).await? {
             Backend::Directory(backend) => Self::init_with_backend(backend).await,
+            Backend::DynamoDb(backend) => Self::init_with_backend(backend).await,
             _ => todo!("Only the Directory backend is supported"),
         }
     }

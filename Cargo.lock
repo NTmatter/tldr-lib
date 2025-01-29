@@ -1617,6 +1617,7 @@ dependencies = [
  "aws-sdk-dynamodb",
  "base64ct",
  "elliptic-curve",
+ "log",
  "p521",
  "serde",
  "serde_json",

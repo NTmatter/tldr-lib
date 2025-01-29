@@ -1,4 +1,5 @@
 use crate::backend::dir::DirBackend;
+use crate::backend::dynamodb::DynamoDbStore;
 use crate::backend::vec::VecBackend;
 use crate::{KeyWithMetadata, MyJwkEcKey, Thumbprint};
 use std::collections::HashMap;
@@ -93,7 +94,7 @@ pub(crate) enum Backend {
     /// Specify with `mssql://server/table`
     MsSqlServer,
     /// Specify with `dynamodb://table-name`
-    DynamoDb,
+    DynamoDb(DynamoDbStore),
     /// Retrieve from AWS Secrets Manager. Expects a secret that contains a list of derive and sign/verify keys.
     ///
     /// Specify with `asm://secret_name`
@@ -101,7 +102,7 @@ pub(crate) enum Backend {
 }
 
 impl Backend {
-    pub fn for_url(url: &Url) -> Result<Backend, std::io::Error> {
+    pub async fn for_url(url: &Url) -> Result<Backend, std::io::Error> {
         use Backend::*;
         match url.scheme() {
             "env" => Ok(Env),
@@ -109,12 +110,12 @@ impl Backend {
             "sqlite" => Ok(Sqlite),
             "postgres" => Ok(Postgres),
             "mssql" => Ok(MsSqlServer),
-            "dynamodb" => Ok(DynamoDb),
+            "dynamodb" => Ok(DynamoDb(DynamoDbStore::new(url).await?)),
             "asm" => Ok(AwsSecretsManager),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Unknown backend scheme: {}", url.scheme()),
-            )),
+            ))?,
         }
     }
 }
