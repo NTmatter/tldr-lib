@@ -12,6 +12,7 @@ use elliptic_curve::{rand_core::OsRng, JwkEcKey};
 use p521::ecdsa;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
+use std::collections::HashSet;
 use std::{
     collections::HashMap,
     fs::File,
@@ -196,20 +197,13 @@ impl TangyLib {
                     format!("Requested signing key {} not found", kid),
                 ));
             }
-            if key.unwrap().key_ops.is_none() {
+            if key.unwrap().key_ops.is_empty() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!("Requested signing key {} cannot be used for signing", kid),
                 ));
             }
-            if !key
-                .as_ref()
-                .unwrap()
-                .key_ops
-                .as_ref()
-                .unwrap()
-                .contains(&"sign".to_string())
-            {
+            if !key.as_ref().unwrap().key_ops.contains(&"sign".to_string()) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!("Requested signing key {} cannot be used for signing", kid),
@@ -226,11 +220,7 @@ impl TangyLib {
                     .iter()
                     .map(|v| {
                         let mut k = v.to_public_key();
-                        let mut ops = k.key_ops.take();
-                        if let Some(ops) = &mut ops {
-                            ops.retain(|v| *v != "sign");
-                        }
-                        k.key_ops = ops;
+                        k.key_ops.remove("sign");
                         k
                     })
                     .collect(),
@@ -481,8 +471,8 @@ fn create_new_jwk(alg: &str, key_ops: &[&str]) -> String {
                 .unwrap()
                 .to_string(),
         ),
-        key_ops: Some(key_ops.iter().map(|k| k.to_string()).collect()),
-        use_: None,
+        key_ops: key_ops.iter().map(|k| k.to_string()).collect(),
+        r#use: None,
         kid: None,
         x5u: None,
         x5c: None,
@@ -527,7 +517,7 @@ fn diffie_hellman_public_key(
     formatted_public_key.alg = Some("ECMR".into());
     formatted_public_key.crv = "P-521".into();
     formatted_public_key.kty = "EC".into();
-    formatted_public_key.key_ops = Some(vec!["deriveKey".into()]);
+    formatted_public_key.key_ops = HashSet::from_iter(vec!["deriveKey".to_string()]);
 
     formatted_public_key
 }
@@ -573,14 +563,14 @@ pub struct MyJwkEcKey {
     ///
     /// Value is optional and not used by this crate.
     #[serde(skip_serializing_if = "Option::is_none", rename = "use")]
-    pub use_: Option<String>,
+    pub r#use: Option<String>,
 
     /// The Key Operations as described in RFC 7517 4.3:
     /// <https://datatracker.ietf.org/doc/html/rfc7517#section-4.3>
     ///
     /// Value is optional and not used by this crate.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub key_ops: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "HashSet::is_empty")]
+    pub key_ops: HashSet<String>,
 
     /// The Algorithm as described in RFC 7517 4.4:
     /// <https://datatracker.ietf.org/doc/html/rfc7517#section-4.4>
