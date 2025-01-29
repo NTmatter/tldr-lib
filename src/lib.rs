@@ -119,7 +119,13 @@ impl TangyLib {
             let new_signing_key = serde_json::from_str::<MyJwkEcKey>(&new_signing_key)?;
             let new_derive_key = serde_json::from_str::<MyJwkEcKey>(&new_derive_key)?;
 
+            let signing_key_thumbprint = new_signing_key.thumbprint();
+            let derive_key_thumbprint = new_derive_key.thumbprint();
+
             backend.store_keys(new_signing_key, new_derive_key).await?;
+            backend
+                .advertise_keys(&signing_key_thumbprint, &derive_key_thumbprint)
+                .await?;
 
             // Re-fetch all keys.
             loaded_keys = backend.get_all_keys().await?;

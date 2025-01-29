@@ -310,21 +310,18 @@ impl JwkStore for DynamoDbStore {
             .update_item()
             .table_name(self.table.clone())
             .key("thumbprint", S(signing_thumbprint.clone()))
-            .attribute_updates(
-                "advertise",
-                AttributeValueUpdate::builder()
-                    .action(Put)
-                    .value(Bool(true))
-                    .build(),
-            )
+            .update_expression("SET advertise = :advertise")
+            .expression_attribute_values(":thp", S(signing_thumbprint.clone()))
+            .expression_attribute_values(":advertise", Bool(true))
             .condition_expression("thumbprint = :thp")
-            .expression_attribute_values("thp", S(signing_thumbprint.clone()))
             .send()
             .await
             .map_err(|err| {
                 std::io::Error::new(
                     ErrorKind::Other,
-                    format!("Failed to mark signing key {signing_thumbprint} as advertised"),
+                    format!(
+                        "Failed to mark signing key {signing_thumbprint} as advertised: {err:?}"
+                    ),
                 )
             })?;
 
@@ -333,21 +330,16 @@ impl JwkStore for DynamoDbStore {
             .update_item()
             .table_name(self.table.clone())
             .key("thumbprint", S(derive_thumbprint.clone()))
-            .attribute_updates(
-                "advertise",
-                AttributeValueUpdate::builder()
-                    .action(Put)
-                    .value(Bool(true))
-                    .build(),
-            )
+            .update_expression("SET advertise = :advertise")
+            .expression_attribute_values(":thp", S(derive_thumbprint.clone()))
+            .expression_attribute_values(":advertise", Bool(true))
             .condition_expression("thumbprint = :thp")
-            .expression_attribute_values("thp", S(derive_thumbprint.clone()))
             .send()
             .await
             .map_err(|err| {
                 std::io::Error::new(
                     ErrorKind::Other,
-                    format!("Failed to mark derive key {derive_thumbprint} as advertised"),
+                    format!("Failed to mark derive key {derive_thumbprint} as advertised: {err:?}"),
                 )
             })?;
 
@@ -364,21 +356,18 @@ impl JwkStore for DynamoDbStore {
             .update_item()
             .table_name(self.table.clone())
             .key("thumbprint", S(signing_thumbprint.clone()))
-            .attribute_updates(
-                "advertise",
-                AttributeValueUpdate::builder()
-                    .action(Put)
-                    .value(Bool(false))
-                    .build(),
-            )
+            .update_expression("SET advertise = :advertise")
+            .expression_attribute_values(":thp", S(signing_thumbprint.clone()))
+            .expression_attribute_values(":advertise", Bool(false))
             .condition_expression("thumbprint = :thp")
-            .expression_attribute_values("thp", S(signing_thumbprint.clone()))
             .send()
             .await
             .map_err(|err| {
                 std::io::Error::new(
                     ErrorKind::Other,
-                    format!("Failed to mark signing key {signing_thumbprint} as advertised"),
+                    format!(
+                        "Failed to mark signing key {signing_thumbprint} as advertised: {err:?}"
+                    ),
                 )
             })?;
 
@@ -387,21 +376,16 @@ impl JwkStore for DynamoDbStore {
             .update_item()
             .table_name(self.table.clone())
             .key("thumbprint", S(derive_thumbprint.clone()))
-            .attribute_updates(
-                "advertise",
-                AttributeValueUpdate::builder()
-                    .action(Put)
-                    .value(Bool(false))
-                    .build(),
-            )
+            .update_expression("SET advertise = :advertise")
+            .expression_attribute_values(":thp", S(derive_thumbprint.clone()))
+            .expression_attribute_values(":advertise", Bool(false))
             .condition_expression("thumbprint = :thp")
-            .expression_attribute_values("thp", S(derive_thumbprint.clone()))
             .send()
             .await
             .map_err(|err| {
                 std::io::Error::new(
                     ErrorKind::Other,
-                    format!("Failed to mark derive key {derive_thumbprint} as advertised"),
+                    format!("Failed to mark derive key {derive_thumbprint} as advertised: {err:?}"),
                 )
             })?;
 
