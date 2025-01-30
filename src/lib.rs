@@ -74,16 +74,6 @@ impl From<MyJwkEcKey> for KeyWithMetadata {
     }
 }
 
-// DESIGN The key source needs to allow dynamic fetching.
-// LocalDir should hit the filesystem on each request (may incur lots of IO, unless we can be smarter)
-// Vector should be an `Arc<RwLock<Vec<T>>` for external management
-// DynamoDB
-#[derive(PartialEq)]
-pub enum KeySource<'a> {
-    LocalDir(&'a Path),
-    Vector(&'a Vec<&'a str>),
-}
-
 impl TangyLib {
     pub async fn init(source: &Url) -> anyhow::Result<Self, std::io::Error> {
         match Backend::for_url(source).await? {

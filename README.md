@@ -2,8 +2,11 @@
 Tang in a Lambda with Database, written in Rust.
 
 ## Description
-An inexpensive high-availability/fault-tolerant Tang server backed by a database.
+A serverless high-availability/fault-tolerant Tang server with broad backend support. This crate provides backend functionality and secret recovery functionality, which can be served by a small web application or serverless function.
 
+The current focus is the AWS serverless platform, leveraging Lambda and DynamoDB, which can scale down to zero for small deployments, and can scale up as far up as your budget will allow.
+
+## History and Lineage
 The TLDR Lib is fork of Martyn P's [Tangy-Lib](https://github.com/martynp/tangy-lib), which reimplements the core functionality of Latchset's [Tang](https://github.com/latchset/tang) server.
 
 TLDR Lib diverges from Tangy-Lib by using a database to store keys, rather than a filesystem. The initial focus will be on DynamoDB to facilitate small AWS deployments.
@@ -34,13 +37,20 @@ tldr-lib = "0.1"
 
 ## Usage
 
-Tldr-lib has an initialization method which can take a local directory or vector of JWK string as input:
+Tldr-lib has an initialization method which takes a URL as input:
 
 ``` rust
 use tldr_lib::{KeySource, TangyLib};
-let mut tangy = TangyLib::init(KeySource::LocalDir(&dir_path)).unwrap();
-// or
-let mut tangy = TangyLib::init(KeySource::Vector(&vec_of_keys)).unwrap();
+use url::Url;
+
+let url = Url::parse("file://path/to/store"); // File-based backend
+let url = Url::parse("dynamodb://"); // All args from environment, default table is tldr-keys
+let url = Url::parse("dynamodb:///custom-table");
+let url = Url::parse("dynamodb://localhost:8000/custom-table?insecure=true");
+
+// More backends to come!
+
+let mut tangy = TangyLib::new(url).unwrap();
 ```
 
 If the `LocalDir` does not contain a key set, a new key set is generated and saved to that folder.

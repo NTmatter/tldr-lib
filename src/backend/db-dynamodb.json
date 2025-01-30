@@ -1,6 +1,7 @@
 {
   "TableDescription": {
     "TableName": "tldr",
+    "BillingMode": "PAY_PER_REQUEST",
     "AttributeDefinitions": [
       {
         "AttributeName": "thumbprint","AttributeType": "S"
