@@ -3,7 +3,7 @@
 
 use crate::backend::JwkStore;
 use crate::{thumbprint, KeyWithMetadata, MyJwkEcKey, Thumbprint};
-use anyhow::bail;
+use anyhow::{bail, Context};
 use aws_config::default_provider::endpoint_url;
 use aws_config::{Region, SdkConfig};
 use aws_sdk_dynamodb::config::BehaviorVersion;
@@ -14,7 +14,7 @@ use aws_sdk_dynamodb::types::AttributeAction::Put;
 use aws_sdk_dynamodb::types::AttributeValue::{Bool, Null, Ss, S};
 use aws_sdk_dynamodb::types::{
     AttributeAction, AttributeDefinition, AttributeValue, AttributeValueUpdate, BillingMode,
-    KeySchemaElement, KeyType, ProvisionedThroughput, ScalarAttributeType,
+    KeySchemaElement, KeyType, OnDemandThroughput, ProvisionedThroughput, ScalarAttributeType, Tag,
 };
 use aws_sdk_dynamodb::Client;
 use log::{debug, info};
@@ -141,36 +141,14 @@ impl DynamoDbStore {
         })
     }
 
-    /// Create a new DynamoDB table.
-    ///
-    /// The table definition uses the thumbprint as a key, and is equivalent to:
-    /// ```json
-    /// {
-    ///   "TableDescription": {
-    ///     "TableName": "{table}",
-    ///     "BillingMode": "PAY_PER_REQUEST",
-    ///     "AttributeDefinitions": [
-    ///       {
-    ///         "AttributeName": "thumbprint","AttributeType": "S"
-    ///       }
-    ///     ],
-    ///     "KeySchema": [
-    ///       {
-    ///         "AttributeName": "thumbprint","KeyType": "HASH"
-    ///       }
-    ///     ],
-    ///     "ProvisionedThroughput": {
-    ///       "ReadCapacityUnits": 1,"WriteCapacityUnits": 1
-    ///     },
-    ///     "TableClassSummary": {
-    ///       "TableClass": "STANDARD"
-    ///     }
-    ///   }
-    /// }
-    /// ```
+    /// Create a new DynamoDB table. Refer to `db-dynamodb.json` for the details.
     ///
     /// Based on the [CreateTable example](https://github.com/awsdocs/aws-doc-sdk-examples/blob/main/rustv1/examples/dynamodb/src/scenario/create.rs#L12)
     async fn create_table(client: &Client, table: &str) -> anyhow::Result<CreateTableOutput> {
+        const MAX_READ_REQUESTS_PER_SECOND: i64 = 20;
+        const MAX_WRITE_REQUESTS_PER_SECOND: i64 = 20;
+        const DELETION_PROTECTION: bool = true;
+
         let key_attribute_name = "thumbprint";
         let attribute_def = AttributeDefinition::builder()
             .attribute_name(key_attribute_name)
@@ -182,14 +160,29 @@ impl DynamoDbStore {
             .attribute_name(key_attribute_name)
             .build()?;
 
+        let on_demand_throughput = OnDemandThroughput::builder()
+            .set_max_read_request_units(Some(MAX_READ_REQUESTS_PER_SECOND))
+            .set_max_write_request_units(Some(MAX_WRITE_REQUESTS_PER_SECOND))
+            .build();
+
+        let description_tag = Tag::builder()
+            .key("description")
+            .value("Key store for TLDR Tang service")
+            .build()
+            .context("Tag must be valid")?;
+
         let res = client
             .create_table()
             .table_name(table)
+            .deletion_protection_enabled(DELETION_PROTECTION)
             .billing_mode(BillingMode::PayPerRequest)
             .key_schema(key_schema)
             .attribute_definitions(attribute_def)
+            .on_demand_throughput(on_demand_throughput)
+            .tags(description_tag)
             .send()
-            .await?;
+            .await
+            .context("Create backing DynamoDB table")?;
 
         Ok(res)
     }

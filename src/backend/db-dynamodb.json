@@ -2,6 +2,7 @@
   "TableDescription": {
     "TableName": "tldr",
     "BillingMode": "PAY_PER_REQUEST",
+    "DeletionProtectionEnabled": true,
     "AttributeDefinitions": [
       {
         "AttributeName": "thumbprint","AttributeType": "S"
@@ -12,8 +13,9 @@
         "AttributeName": "thumbprint","KeyType": "HASH"
       }
     ],
-    "ProvisionedThroughput": {
-      "ReadCapacityUnits": 1,"WriteCapacityUnits": 1
+    "OnDemandThroughput": {
+      "MaxReadRequestUnits": 10,
+      "MaxWriteRequestUnits": 20
     },
     "TableClassSummary": {
       "TableClass": "STANDARD"
